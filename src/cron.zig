@@ -417,12 +417,18 @@ pub const CronScheduler = struct {
         self.jobs.deinit(self.allocator);
     }
 
+    fn freeJobOwned(self: *CronScheduler, job: *const CronJob) void {
+        self.allocator.free(job.id);
+        self.allocator.free(job.expression);
+        self.allocator.free(job.command);
+        if (job.last_output) |o| self.allocator.free(o);
+        if (job.delivery.channel) |channel| self.allocator.free(channel);
+        if (job.delivery.to) |target| self.allocator.free(target);
+    }
+
     fn clearJobs(self: *CronScheduler) void {
         for (self.jobs.items) |job| {
-            self.allocator.free(job.id);
-            self.allocator.free(job.expression);
-            self.allocator.free(job.command);
-            if (job.last_output) |o| self.allocator.free(o);
+            self.freeJobOwned(&job);
         }
         self.jobs.clearRetainingCapacity();
     }
@@ -575,9 +581,7 @@ pub const CronScheduler = struct {
     pub fn removeJob(self: *CronScheduler, id: []const u8) bool {
         for (self.jobs.items, 0..) |job, i| {
             if (std.mem.eql(u8, job.id, id)) {
-                self.allocator.free(job.id);
-                self.allocator.free(job.expression);
-                self.allocator.free(job.command);
+                self.freeJobOwned(&job);
                 _ = self.jobs.orderedRemove(i);
                 return true;
             }
@@ -724,10 +728,7 @@ pub const CronScheduler = struct {
                 i -= 1;
                 const rm_idx = remove_indices[i];
                 const job = self.jobs.items[rm_idx];
-                self.allocator.free(job.id);
-                self.allocator.free(job.expression);
-                self.allocator.free(job.command);
-                if (job.last_output) |o| self.allocator.free(o);
+                self.freeJobOwned(&job);
                 _ = self.jobs.orderedRemove(rm_idx);
             }
         }
@@ -821,6 +822,37 @@ fn loadJobsWithPolicy(scheduler: *CronScheduler, policy: LoadPolicy) !void {
             break :blk false;
         };
 
+        var delivery: DeliveryConfig = .{};
+        if (obj.get("delivery")) |v| {
+            if (v == .object) {
+                const dobj = v.object;
+                if (dobj.get("mode")) |mode_val| {
+                    if (mode_val == .string) {
+                        delivery.mode = DeliveryMode.parse(mode_val.string);
+                    }
+                }
+                if (dobj.get("channel")) |channel_val| {
+                    if (channel_val == .string) {
+                        delivery.channel = try scheduler.allocator.dupe(u8, channel_val.string);
+                    }
+                }
+                if (dobj.get("to")) |to_val| {
+                    if (to_val == .string) {
+                        delivery.to = try scheduler.allocator.dupe(u8, to_val.string);
+                    }
+                }
+                if (dobj.get("best_effort")) |best_effort_val| {
+                    if (best_effort_val == .bool) {
+                        delivery.best_effort = best_effort_val.bool;
+                    }
+                }
+            }
+        }
+        errdefer {
+            if (delivery.channel) |channel| scheduler.allocator.free(channel);
+            if (delivery.to) |target| scheduler.allocator.free(target);
+        }
+
         try scheduler.jobs.append(scheduler.allocator, .{
             .id = try scheduler.allocator.dupe(u8, id),
             .expression = try scheduler.allocator.dupe(u8, expression),
@@ -828,6 +860,7 @@ fn loadJobsWithPolicy(scheduler: *CronScheduler, policy: LoadPolicy) !void {
             .next_run_secs = next_run_secs,
             .paused = paused,
             .one_shot = one_shot,
+            .delivery = delivery,
         });
     }
 }
@@ -950,6 +983,28 @@ pub fn saveJobs(scheduler: *const CronScheduler) !void {
         try buf.appendSlice(scheduler.allocator, ",");
         try json_util.appendJsonKey(&buf, scheduler.allocator, "one_shot");
         try buf.appendSlice(scheduler.allocator, if (job.one_shot) "true" else "false");
+        try buf.appendSlice(scheduler.allocator, ",");
+        try json_util.appendJsonKey(&buf, scheduler.allocator, "delivery");
+        try buf.appendSlice(scheduler.allocator, "{");
+        try json_util.appendJsonKeyValue(&buf, scheduler.allocator, "mode", job.delivery.mode.asStr());
+        try buf.appendSlice(scheduler.allocator, ",");
+        try json_util.appendJsonKey(&buf, scheduler.allocator, "channel");
+        if (job.delivery.channel) |channel| {
+            try json_util.appendJsonString(&buf, scheduler.allocator, channel);
+        } else {
+            try buf.appendSlice(scheduler.allocator, "null");
+        }
+        try buf.appendSlice(scheduler.allocator, ",");
+        try json_util.appendJsonKey(&buf, scheduler.allocator, "to");
+        if (job.delivery.to) |target| {
+            try json_util.appendJsonString(&buf, scheduler.allocator, target);
+        } else {
+            try buf.appendSlice(scheduler.allocator, "null");
+        }
+        try buf.appendSlice(scheduler.allocator, ",");
+        try json_util.appendJsonKey(&buf, scheduler.allocator, "best_effort");
+        try buf.appendSlice(scheduler.allocator, if (job.delivery.best_effort) "true" else "false");
+        try buf.appendSlice(scheduler.allocator, "}");
 
         try buf.appendSlice(scheduler.allocator, "}");
     }
@@ -1349,6 +1404,32 @@ test "save and load roundtrip" {
     try std.testing.expect(loaded[1].one_shot);
 }
 
+test "save and load roundtrip preserves delivery metadata" {
+    var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
+    defer scheduler.deinit();
+
+    _ = try scheduler.addOnce("3m", "echo delivery");
+    scheduler.jobs.items[0].delivery = .{
+        .mode = .always,
+        .channel = try std.testing.allocator.dupe(u8, "telegram"),
+        .to = try std.testing.allocator.dupe(u8, "12345"),
+        .best_effort = false,
+    };
+
+    try saveJobs(&scheduler);
+
+    var loaded = CronScheduler.init(std.testing.allocator, 10, true);
+    defer loaded.deinit();
+    try loadJobsStrict(&loaded);
+
+    try std.testing.expectEqual(@as(usize, 1), loaded.listJobs().len);
+    const job = loaded.listJobs()[0];
+    try std.testing.expectEqual(DeliveryMode.always, job.delivery.mode);
+    try std.testing.expectEqualStrings("telegram", job.delivery.channel.?);
+    try std.testing.expectEqualStrings("12345", job.delivery.to.?);
+    try std.testing.expect(!job.delivery.best_effort);
+}
+
 test "reloadJobs auto-recovers malformed store and keeps runtime jobs" {
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
@@ -1703,8 +1784,8 @@ test "shell job delivers stdout via bus" {
     // Configure delivery
     scheduler.jobs.items[0].delivery = .{
         .mode = .always,
-        .channel = "telegram",
-        .to = "chat99",
+        .channel = try allocator.dupe(u8, "telegram"),
+        .to = try allocator.dupe(u8, "chat99"),
     };
     scheduler.jobs.items[0].next_run_secs = 0;
 
@@ -1738,8 +1819,8 @@ test "agent job delivers result via bus" {
         .next_run_secs = 0,
         .delivery = .{
             .mode = .always,
-            .channel = "discord",
-            .to = "general",
+            .channel = try allocator.dupe(u8, "discord"),
+            .to = try allocator.dupe(u8, "general"),
         },
     });
 

@@ -9,9 +9,9 @@ const CronScheduler = cron.CronScheduler;
 /// CronAdd tool — creates a new cron job with either a cron expression or a delay.
 pub const CronAddTool = struct {
     pub const tool_name = "cron_add";
-    pub const tool_description = "Create a scheduled cron job. Provide either 'expression' (cron syntax) or 'delay' (e.g. '30m', '2h') plus 'command'.";
+    pub const tool_description = "Create a scheduled cron job. Provide either 'expression' (cron syntax) or 'delay' (e.g. '30m', '2h') plus 'command'. Optional delivery fields: delivery_mode, delivery_channel, delivery_to.";
     pub const tool_params =
-        \\{"type":"object","properties":{"expression":{"type":"string","description":"Cron expression (e.g. '*/5 * * * *')"},"delay":{"type":"string","description":"Delay for one-shot tasks (e.g. '30m', '2h')"},"command":{"type":"string","description":"Shell command to execute"},"name":{"type":"string","description":"Optional job name"}},"required":["command"]}
+        \\{"type":"object","properties":{"expression":{"type":"string","description":"Cron expression (e.g. '*/5 * * * *')"},"delay":{"type":"string","description":"Delay for one-shot tasks (e.g. '30m', '2h')"},"command":{"type":"string","description":"Shell command to execute"},"name":{"type":"string","description":"Optional job name"},"delivery_mode":{"type":"string","enum":["none","always","on_error","on_success"],"description":"Optional delivery mode for channel notifications"},"delivery_channel":{"type":"string","description":"Optional channel for delivery (e.g. 'telegram')"},"delivery_to":{"type":"string","description":"Optional channel target/chat_id for delivery"},"delivery_best_effort":{"type":"boolean","description":"Optional; when true, delivery failures are non-fatal"}},"required":["command"]}
     ;
 
     const vtable = root.ToolVTable(@This());
@@ -50,10 +50,19 @@ pub const CronAddTool = struct {
         };
         defer scheduler.deinit();
 
+        const delivery = parseDeliveryConfig(args) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "Invalid delivery configuration: {s}", .{@errorName(err)});
+            return ToolResult{ .success = false, .output = "", .error_msg = msg };
+        };
+
         // Prefer expression (recurring) over delay (one-shot)
         if (expression) |expr| {
             const job = scheduler.addJob(expr, command) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to create job: {s}", .{@errorName(err)});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            };
+            setJobDeliveryOwned(allocator, job, delivery) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "Failed to configure delivery: {s}", .{@errorName(err)});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
 
@@ -72,6 +81,10 @@ pub const CronAddTool = struct {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to create one-shot task: {s}", .{@errorName(err)});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
+            setJobDeliveryOwned(allocator, job, delivery) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "Failed to configure delivery: {s}", .{@errorName(err)});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            };
 
             cron.saveJobs(&scheduler) catch {};
 
@@ -86,6 +99,50 @@ pub const CronAddTool = struct {
         return ToolResult.fail("Unexpected state: no expression or delay");
     }
 };
+
+pub fn parseDeliveryConfig(args: JsonObjectMap) !cron.DeliveryConfig {
+    var delivery: cron.DeliveryConfig = .{};
+
+    if (root.getString(args, "delivery_mode")) |mode_raw| {
+        delivery.mode = parseDeliveryMode(mode_raw) catch return error.InvalidDeliveryMode;
+    }
+    if (root.getString(args, "delivery_channel")) |channel| {
+        delivery.channel = channel;
+    }
+    if (root.getString(args, "delivery_to")) |target| {
+        delivery.to = target;
+    }
+    if (root.getBool(args, "delivery_best_effort")) |best_effort| {
+        delivery.best_effort = best_effort;
+    }
+
+    if (delivery.mode != .none and delivery.channel == null) return error.DeliveryChannelRequired;
+    return delivery;
+}
+
+pub fn setJobDeliveryOwned(allocator: std.mem.Allocator, job: *cron.CronJob, delivery: cron.DeliveryConfig) !void {
+    job.delivery.mode = delivery.mode;
+    job.delivery.best_effort = delivery.best_effort;
+    job.delivery.channel = null;
+    job.delivery.to = null;
+
+    if (delivery.channel) |channel| {
+        job.delivery.channel = try allocator.dupe(u8, channel);
+    }
+    errdefer if (job.delivery.channel) |channel| allocator.free(channel);
+
+    if (delivery.to) |target| {
+        job.delivery.to = try allocator.dupe(u8, target);
+    }
+}
+
+fn parseDeliveryMode(raw: []const u8) !cron.DeliveryMode {
+    if (std.ascii.eqlIgnoreCase(raw, "none")) return .none;
+    if (std.ascii.eqlIgnoreCase(raw, "always")) return .always;
+    if (std.ascii.eqlIgnoreCase(raw, "on_error")) return .on_error;
+    if (std.ascii.eqlIgnoreCase(raw, "on_success")) return .on_success;
+    return error.InvalidDeliveryMode;
+}
 
 /// Load the CronScheduler from persisted state (~/.nullclaw/cron.json).
 /// Shared by cron_add, cron_list, cron_remove, and schedule tools.

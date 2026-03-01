@@ -1356,6 +1356,46 @@ pub const Agent = struct {
             std.ascii.eqlIgnoreCase(key, "__bootstrap.prompt.TOOLS.md");
     }
 
+    fn should_apply_cron_delivery_defaults(ctx: ?prompt.ConversationContext, tool_name: []const u8, args: std.json.ObjectMap) bool {
+        const cc = ctx orelse return false;
+        _ = cc.channel orelse return false;
+        _ = cc.reply_target orelse return false;
+
+        if (args.get("delivery_channel") != null or args.get("delivery_to") != null or args.get("delivery_mode") != null) {
+            return false;
+        }
+
+        if (std.ascii.eqlIgnoreCase(tool_name, "cron_add")) {
+            return true;
+        }
+
+        if (!std.ascii.eqlIgnoreCase(tool_name, "schedule")) {
+            return false;
+        }
+
+        const action_value = args.get("action") orelse return false;
+        const action = switch (action_value) {
+            .string => |s| s,
+            else => return false,
+        };
+        return std.ascii.eqlIgnoreCase(action, "create") or
+            std.ascii.eqlIgnoreCase(action, "add") or
+            std.ascii.eqlIgnoreCase(action, "once");
+    }
+
+    fn apply_cron_delivery_defaults(self: *Agent, allocator: std.mem.Allocator, tool_name: []const u8, args: *std.json.ObjectMap) void {
+        if (!should_apply_cron_delivery_defaults(self.conversation_context, tool_name, args.*)) return;
+
+        const cc = self.conversation_context.?;
+        const channel = cc.channel.?;
+        const reply_target = cc.reply_target.?;
+
+        _ = allocator;
+        args.put("delivery_mode", .{ .string = "always" }) catch return;
+        args.put("delivery_channel", .{ .string = channel }) catch return;
+        args.put("delivery_to", .{ .string = reply_target }) catch return;
+    }
+
     fn executeTool(self: *Agent, tool_allocator: std.mem.Allocator, call: ParsedToolCall) ToolExecutionResult {
         // Policy gate: check autonomy and rate limit
         if (self.policy) |pol| {
@@ -1398,7 +1438,7 @@ pub const Agent = struct {
                 };
                 defer parsed.deinit();
 
-                const args: std.json.ObjectMap = switch (parsed.value) {
+                var args: std.json.ObjectMap = switch (parsed.value) {
                     .object => |o| o,
                     else => {
                         return .{
@@ -1409,6 +1449,8 @@ pub const Agent = struct {
                         };
                     },
                 };
+
+                apply_cron_delivery_defaults(self, tool_allocator, trimmed_call_name, &args);
 
                 if (isExecToolName(call.name)) {
                     if (self.execBlockMessage(args)) |msg| {

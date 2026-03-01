@@ -21,6 +21,7 @@ const channel_adapters = @import("channel_adapters.zig");
 const heartbeat_mod = @import("heartbeat.zig");
 const onboard = @import("onboard.zig");
 const streaming = @import("streaming.zig");
+const ConversationContext = @import("agent/prompt.zig").ConversationContext;
 
 const log = std.log.scoped(.daemon);
 
@@ -671,10 +672,16 @@ fn inboundDispatcherThread(
             .chat_id = msg.chat_id,
         };
 
+        const conversation_context: ?ConversationContext = .{
+            .channel = msg.channel,
+            .reply_target = msg.chat_id,
+            .is_group = parsed_meta.fields.is_group,
+        };
+
         const reply = runtime.session_mgr.processMessageStreaming(
             session_key,
             msg.content,
-            null,
+            conversation_context,
             if (use_streaming_outbound)
                 streaming.Sink{
                     .callback = publishStreamingChunk,

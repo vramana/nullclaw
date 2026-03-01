@@ -450,7 +450,13 @@ pub fn runTelegramLoop(
             tg_ptr.startTyping(typing_target) catch {};
             defer tg_ptr.stopTyping(typing_target) catch {};
 
-            const reply = runtime.session_mgr.processMessage(session_key, msg.content, null) catch |err| {
+            const conversation_context: ?ConversationContext = .{
+                .channel = "telegram",
+                .reply_target = msg.sender,
+                .is_group = msg.is_group,
+            };
+
+            const reply = runtime.session_mgr.processMessage(session_key, msg.content, conversation_context) catch |err| {
                 log.err("Agent error: {}", .{err});
                 const err_msg: []const u8 = switch (err) {
                     error.CurlFailed, error.CurlReadError, error.CurlWaitError, error.CurlWriteError => "Network error. Please try again.",

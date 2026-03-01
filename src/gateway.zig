@@ -16,6 +16,7 @@ const health = @import("health.zig");
 const Config = @import("config.zig").Config;
 const config_types = @import("config_types.zig");
 const session_mod = @import("session.zig");
+const ConversationContext = @import("agent/prompt.zig").ConversationContext;
 const providers = @import("providers/root.zig");
 const tools_mod = @import("tools/root.zig");
 const memory_mod = @import("memory/root.zig");
@@ -1600,7 +1601,12 @@ fn handleTelegramWebhookRoute(ctx: *WebhookHandlerContext) void {
                 var kb: [64]u8 = undefined;
                 const tg_cfg_opt: ?*const Config = if (ctx.config_opt) |cfg| cfg else null;
                 const sk = telegramSessionKeyRouted(ctx.req_allocator, &kb, chat_id.?, b, tg_cfg_opt, tg_account_id);
-                const reply: ?[]const u8 = sm.processMessage(sk, msg_text.?, null) catch |err| blk: {
+                const conversation_context: ?ConversationContext = .{
+                    .channel = "telegram",
+                    .reply_target = cid_str,
+                    .is_group = is_group,
+                };
+                const reply: ?[]const u8 = sm.processMessage(sk, msg_text.?, conversation_context) catch |err| blk: {
                     if (tg_bot_token.len > 0) {
                         sendTelegramReply(ctx.req_allocator, tg_bot_token, chat_id.?, userFacingAgentError(err)) catch {};
                     }

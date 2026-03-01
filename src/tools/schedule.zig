@@ -6,14 +6,16 @@ const JsonObjectMap = root.JsonObjectMap;
 const cron = @import("../cron.zig");
 const CronScheduler = cron.CronScheduler;
 const loadScheduler = @import("cron_add.zig").loadScheduler;
+const parseDeliveryConfig = @import("cron_add.zig").parseDeliveryConfig;
+const setJobDeliveryOwned = @import("cron_add.zig").setJobDeliveryOwned;
 
 /// Schedule tool — lets the agent manage recurring and one-shot scheduled tasks.
 /// Delegates to the CronScheduler from the cron module for persistent job management.
 pub const ScheduleTool = struct {
     pub const tool_name = "schedule";
-    pub const tool_description = "Manage scheduled tasks. Actions: create/add/once/list/get/cancel/remove/pause/resume";
+    pub const tool_description = "Manage scheduled tasks. Actions: create/add/once/list/get/cancel/remove/pause/resume. Optional delivery fields: delivery_mode, delivery_channel, delivery_to.";
     pub const tool_params =
-        \\{"type":"object","properties":{"action":{"type":"string","enum":["create","add","once","list","get","cancel","remove","pause","resume"],"description":"Action to perform"},"expression":{"type":"string","description":"Cron expression for recurring tasks"},"delay":{"type":"string","description":"Delay for one-shot tasks (e.g. '30m', '2h')"},"command":{"type":"string","description":"Shell command to execute"},"id":{"type":"string","description":"Task ID"}},"required":["action"]}
+        \\{"type":"object","properties":{"action":{"type":"string","enum":["create","add","once","list","get","cancel","remove","pause","resume"],"description":"Action to perform"},"expression":{"type":"string","description":"Cron expression for recurring tasks"},"delay":{"type":"string","description":"Delay for one-shot tasks (e.g. '30m', '2h')"},"command":{"type":"string","description":"Shell command to execute"},"id":{"type":"string","description":"Task ID"},"delivery_mode":{"type":"string","enum":["none","always","on_error","on_success"],"description":"Optional delivery mode for channel notifications"},"delivery_channel":{"type":"string","description":"Optional channel for delivery (e.g. 'telegram')"},"delivery_to":{"type":"string","description":"Optional channel target/chat_id for delivery"},"delivery_best_effort":{"type":"boolean","description":"Optional; when true, delivery failures are non-fatal"}},"required":["action"]}
     ;
 
     const vtable = root.ToolVTable(@This());
@@ -101,6 +103,10 @@ pub const ScheduleTool = struct {
                 return ToolResult.fail("Missing 'command' parameter");
             const expression = root.getString(args, "expression") orelse
                 return ToolResult.fail("Missing 'expression' parameter for cron job");
+            const delivery = parseDeliveryConfig(args) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "Invalid delivery configuration: {s}", .{@errorName(err)});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            };
 
             var scheduler = loadScheduler(allocator) catch {
                 return ToolResult.fail("Failed to load scheduler state");
@@ -109,6 +115,10 @@ pub const ScheduleTool = struct {
 
             const job = scheduler.addJob(expression, command) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to create job: {s}", .{@errorName(err)});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            };
+            setJobDeliveryOwned(allocator, job, delivery) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "Failed to configure delivery: {s}", .{@errorName(err)});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
 
@@ -127,6 +137,10 @@ pub const ScheduleTool = struct {
                 return ToolResult.fail("Missing 'command' parameter");
             const delay = root.getString(args, "delay") orelse
                 return ToolResult.fail("Missing 'delay' parameter for one-shot task");
+            const delivery = parseDeliveryConfig(args) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "Invalid delivery configuration: {s}", .{@errorName(err)});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            };
 
             var scheduler = loadScheduler(allocator) catch {
                 return ToolResult.fail("Failed to load scheduler state");
@@ -135,6 +149,10 @@ pub const ScheduleTool = struct {
 
             const job = scheduler.addOnce(delay, command) catch |err| {
                 const msg = try std.fmt.allocPrint(allocator, "Failed to create one-shot task: {s}", .{@errorName(err)});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            };
+            setJobDeliveryOwned(allocator, job, delivery) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "Failed to configure delivery: {s}", .{@errorName(err)});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
             };
 

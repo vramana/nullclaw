@@ -109,6 +109,8 @@ fn openWorkspaceFileWithGuards(
 /// Conversation context for the current turn (Signal-specific for now).
 pub const ConversationContext = struct {
     channel: ?[]const u8 = null,
+    /// Channel-specific reply target (e.g. Telegram chat_id, Slack channel/thread target).
+    reply_target: ?[]const u8 = null,
     sender_number: ?[]const u8 = null,
     sender_uuid: ?[]const u8 = null,
     group_id: ?[]const u8 = null,
@@ -200,6 +202,9 @@ pub fn buildSystemPrompt(
         try w.writeAll("## Conversation Context\n\n");
         if (cc.channel) |ch| {
             try std.fmt.format(w, "- Channel: {s}\n", .{ch});
+        }
+        if (cc.reply_target) |target| {
+            try std.fmt.format(w, "- Reply target: {s}\n", .{target});
         }
         if (cc.is_group) |ig| {
             if (ig) {
